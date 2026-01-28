@@ -149,8 +149,6 @@ Despite these simplifications, the tool provides **transparent, explainable, and
 conda env create -f environment.yml
 conda activate mgpy_distribution
 
-```
-
 ### **Running**
 
 ```bash
@@ -173,8 +171,8 @@ http://localhost:8501
 Based on original work by **Edoardo Silvestri**
 
 Technical Advisors  
-- Riccardo Mereu — Politecnico di Milano  
-- Emanuela Colombo — Politecnico di Milano
+- Riccardo Mereu - Politecnico di Milano  
+- Emanuela Colombo - Politecnico di Milano
 
 ---
 
