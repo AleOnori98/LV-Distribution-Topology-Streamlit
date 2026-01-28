@@ -1,11 +1,5 @@
 # **LV Distribution Network - Topology Assessment**
 
-<p align="center">
-  <img src="config/assets/distribution_methodology.png" width="500" alt="Process flow for LV distribution network design">
-</p>
-
----
-
 A lightweight, interactive **Streamlit application** for exploring **Low-Voltage (LV) distribution network topologies** starting from customer locations and optional road data.
 
 The tool is designed as a **planning and assessment aid**, not as a detailed engineering design software. Its main purpose is to help users understand how **settlement geometry**, **connection heuristics**, and **simple engineering rules** affect pole count, LV network length, and costs.
@@ -71,7 +65,9 @@ This guarantees:
 - No loops
 - Minimum total LV conductor length for the given pole locations
 
----
+<p align="center">
+  <img src="config/assets/distribution_methodology.png" width="500" alt="Process flow for LV distribution network design">
+</p>
 
 ### 4. Engineering post-processing: pole-to-pole span control
 
