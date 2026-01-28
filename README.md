@@ -58,8 +58,8 @@ This guarantees:
 - No loops
 - Minimum total LV conductor length for the given pole locations
 
-<p align="center">
-  <img src="config/assets/distribution_methodology.png" width="800" alt="Process flow for LV distribution network design">
+<p align="left">
+  <img src="config/assets/distribution_methodology.png" width="600" alt="Process flow for LV distribution network design">
 </p>
 
 ### 4. Engineering post-processing: pole-to-pole span control
