@@ -4,8 +4,6 @@ A lightweight, interactive **Streamlit application** for exploring **Low-Voltage
 
 The tool is designed as a **planning and assessment aid**, not as a detailed engineering design software. Its main purpose is to help users understand how **settlement geometry**, **connection heuristics**, and **simple engineering rules** affect pole count, LV network length, and costs.
 
----
-
 ## Overview
 
 The application takes as input:
@@ -39,7 +37,6 @@ During this stage, buildings are associated to poles subject to:
 
 Additional poles are iteratively created to serve buildings that remain unassociated.
 
----
 
 ### 2. Optional selective coverage (standalone candidates)
 
@@ -49,8 +46,6 @@ The tool can optionally allow **very small or isolated clusters** of buildings t
 - These buildings are flagged as **standalone system candidates**
 
 This feature enables more realistic modeling of sparse settlements, where extending LV infrastructure may not be economically or technically justified.
-
----
 
 ### 3. LV network routing (Minimum Spanning Tree)
 
@@ -66,7 +61,7 @@ This guarantees:
 - Minimum total LV conductor length for the given pole locations
 
 <p align="center">
-  <img src="config/assets/distribution_methodology.png" width="500" alt="Process flow for LV distribution network design">
+  <img src="config/assets/distribution_methodology.png" width="800" alt="Process flow for LV distribution network design">
 </p>
 
 ### 4. Engineering post-processing: pole-to-pole span control
