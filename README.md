@@ -15,8 +15,6 @@ Using a combination of **heuristic pole placement** and **graph-based optimizati
 - Summary metrics (length, cost, poles, served vs standalone)
 - Downloadable GeoJSON outputs for further GIS analysis
 
----
-
 ## Conceptual Workflow
 
 The tool follows a clear, staged logic:
@@ -79,8 +77,6 @@ To avoid unrealistically long LV spans, the tool applies an optional **post-proc
 
 Importantly, this step **does not change routing decisions** — it only refines the network geometry.
 
----
-
 ## Key Parameters (User Controls)
 
 The main parameters exposed in the interface are:
@@ -106,18 +102,15 @@ The main parameters exposed in the interface are:
 - **Max LV span between poles [m]**  
   Maximum allowed pole-to-pole span; longer segments are subdivided with support poles
 
----
-
 ## Outputs
 
 ### Interactive map
 
 The app displays an interactive map with clear visual encoding:
 
-- **Green points** – buildings served by LV  
-- **Red points** – standalone system candidates (if enabled)  
-- **Black points** – poles (including support poles)  
-- **Blue lines** – LV network (Minimum Spanning Tree)
+<p align="center">
+  <img src="config/assets/results_map.png" width="800" alt="Distribution map example">
+</p>
 
 ### Summary metrics
 
