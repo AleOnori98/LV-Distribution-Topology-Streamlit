@@ -58,8 +58,8 @@ This guarantees:
 - No loops
 - Minimum total LV conductor length for the given pole locations
 
-<p align="left">
-  <img src="config/assets/distribution_methodology.png" width="600" alt="Process flow for LV distribution network design">
+<p align="center">
+  <img src="config/assets/distribution_methodology.png" width="800" alt="Process flow for LV distribution network design">
 </p>
 
 ### 4. Engineering post-processing: pole-to-pole span control
@@ -108,8 +108,8 @@ The main parameters exposed in the interface are:
 
 The app displays an interactive map with clear visual encoding:
 
-<p align="center">
-  <img src="config/assets/results_map.png" width="800" alt="Distribution map example">
+<p align="left">
+  <img src="config/assets/results_map.png" width="600" alt="Distribution map example">
 </p>
 
 ### Summary metrics
