@@ -56,6 +56,17 @@ def _metric_row(metrics: Dict[str, float]) -> None:
     c2.metric("Grid-served buildings", int(metrics.get("num_served", 0)))
     c3.metric("Standalone candidates", int(metrics.get("num_unserved", 0)))
 
+def _geom_to_latlon(g):
+    """Return (lat, lon) for any shapely geometry."""
+    if g is None or g.is_empty:
+        return None
+    if g.geom_type == "Point":
+        p = g
+    else:
+        # Works for Polygon, MultiPolygon, LineString, MultiLineString, etc.
+        p = g.representative_point()
+    return (p.y, p.x)  # (lat, lon)
+
 def _make_map_lv(
     center: tuple[float, float],
     gdf_served,
@@ -101,7 +112,10 @@ def _make_map_lv(
     # Poles
     if gdf_poles is not None and not gdf_poles.empty:
         for _, row in gdf_poles.iterrows():
-            y, x = row.geometry.y, row.geometry.x
+            latlon = _geom_to_latlon(row.geometry)
+            if latlon is None:
+                continue
+            y, x = latlon
             CircleMarker(
                 location=[y, x],
                 radius=3,
@@ -114,7 +128,10 @@ def _make_map_lv(
     # Grid-served buildings (green)
     if gdf_served is not None and not gdf_served.empty:
         for _, row in gdf_served.iterrows():
-            y, x = row.geometry.y, row.geometry.x
+            latlon = _geom_to_latlon(row.geometry)
+            if latlon is None:
+                continue
+            y, x = latlon
             CircleMarker(
                 location=[y, x],
                 radius=2,
@@ -127,7 +144,10 @@ def _make_map_lv(
     # Standalone candidates / unserved (red)
     if gdf_unserved is not None and not gdf_unserved.empty:
         for _, row in gdf_unserved.iterrows():
-            y, x = row.geometry.y, row.geometry.x
+            latlon = _geom_to_latlon(row.geometry)
+            if latlon is None:
+                continue
+            y, x = latlon
             CircleMarker(
                 location=[y, x],
                 radius=3,
