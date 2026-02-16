@@ -22,7 +22,6 @@ from core.distribution_service import run_low_voltage
 # ---------------------------------------------------------------------
 # Streamlit page config
 # ---------------------------------------------------------------------
-
 st.set_page_config(
     page_title="LV Distribution Network",
     layout="wide",
@@ -33,22 +32,34 @@ st.set_page_config(
 # ---------------------------------------------------------------------
 # UI helper functions
 # ---------------------------------------------------------------------
-
 def _metric_row(metrics: Dict[str, float]) -> None:
-    st.subheader("Results summary")
+
+    # ---- Row 1: Network lengths -------------------------------------
+    st.text(
+        "Estimated total line length of the LV system, split between the main backbone "
+        "(pole-to-pole feeder network) and the final connections from poles to individual buildings."
+    )
 
     c1, c2, c3 = st.columns(3)
-    c1.metric(
-        "Network length [km]",
-        f"{metrics.get('network_length_km', 0.0):.2f}",
+    c1.metric("Total network length [km]", f"{metrics.get('total_network_length_km', 0.0):.2f}")
+    c2.metric("LV backbone length [km]", f"{metrics.get('backbone_length_km', 0.0):.2f}")
+    c3.metric("Service drop length [km]", f"{metrics.get('service_drop_length_km', 0.0):.2f}")
+
+    # ---- Row 2: Poles breakdown -------------------------------------
+    st.text(
+        "Number of poles required for the LV network. Serving poles supply buildings directly, "
+        "while support poles are added only to limit span lengths and do not host connections."
     )
-    c2.metric(
-        "Number of poles",
-        int(metrics.get("num_poles_code", 0)),
-    )
-    c3.metric(
-        "Total LV cost [USD]",
-        f"{metrics.get('total_lv_cost_usd', 0.0):,.2f}",
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total poles", int(metrics.get("num_poles_total", 0)))
+    c2.metric("Serving poles", int(metrics.get("num_poles_serving", 0)))
+    c3.metric("Support poles", int(metrics.get("num_poles_support", 0)))
+
+    # ---- Row 3: Buildings breakdown ---------------------------------
+    st.text(
+        "Coverage of the settlement by the LV network. Standalone candidates are buildings "
+        "left unconnected due to isolation or clustering constraints."
     )
 
     c1, c2, c3 = st.columns(3)
@@ -171,6 +182,13 @@ def _render_downloads(downloads: Dict[str, Any]) -> None:
         return
 
     st.subheader("Download outputs")
+
+    st.text(
+        "Export the estimated LV backbone topology as GeoJSON files for use in GIS software. "
+        "Nodes represent pole locations (including support poles), while edges represent the "
+        "pole-to-pole feeder network. Service drops to individual buildings are not included."
+    )
+
     if nodes:
         st.download_button(
             "Download poles (nodes) GeoJSON",
@@ -178,6 +196,7 @@ def _render_downloads(downloads: Dict[str, Any]) -> None:
             file_name="lv_poles.geojson",
             mime="application/geo+json",
         )
+
     if edges:
         st.download_button(
             "Download LV network (edges) GeoJSON",
@@ -185,6 +204,7 @@ def _render_downloads(downloads: Dict[str, Any]) -> None:
             file_name="lv_network.geojson",
             mime="application/geo+json",
         )
+
 
 
 def _show_lv_results(results: Dict[str, Any]) -> None:
@@ -305,24 +325,6 @@ def main() -> None:
     st.markdown("---")
 
     # ---------------------------- Parameters -------------------------
-    st.subheader("Cost parameters")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        cost_per_km_lv = st.number_input(
-            "Cost per km of LV distribution [USD/km]",
-            min_value=0.0,
-            value=float(DEFAULT_COST_PER_KM_LV),
-            step=100.0,
-        )
-    with col2:
-        fixed_costs_lv = st.number_input(
-            "Fixed additional costs [USD]",
-            min_value=0.0,
-            value=float(DEFAULT_FIXED_COSTS_LV),
-            step=100.0,
-        )
-
     st.subheader("Heuristic pole placement and customer association")
 
     col1, col2, col3 = st.columns(3)
@@ -456,8 +458,6 @@ def main() -> None:
                         sampling_distance=float(road_pole_spacing_m),
                         user_distance=float(max_user_connection_radius_m),
                         max_associations=int(max_users_per_pole),
-                        cost_per_km=float(cost_per_km_lv),
-                        fixed_costs=float(fixed_costs_lv),
                         allow_unserved_isolated=allow_unserved_isolated,
                         min_cluster_size=int(min_cluster_size),
                         max_pole_span_m=float(max_pole_span_m),
