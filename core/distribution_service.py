@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, Tuple
+import math
 
 import geopandas as gpd
 import networkx as nx
 import pandas as pd
+from shapely.geometry import Point
 
 from .distribution_io import load_and_transform_data
 from .distribution_algos import (
@@ -13,7 +14,7 @@ from .distribution_algos import (
     associate_buildings_to_poles,
     place_poles_for_unassociated_buildings,
     create_graph_and_mst,
-    densify_mst_edges,          
+    densify_mst_edges,
     mst_edges_as_latlon,
     save_mst_to_geojson,
 )
@@ -25,8 +26,6 @@ def run_low_voltage(
     sampling_distance: float,
     user_distance: float,
     max_associations: int,
-    cost_per_km: float,
-    fixed_costs: float,
     centroid_hint: Tuple[float, float] | None = None,
     *,
     allow_unserved_isolated: bool = False,
@@ -34,61 +33,21 @@ def run_low_voltage(
     max_pole_span_m: float | None = None,
 ) -> Dict[str, Any]:
     """
-    High-level service to compute LV layout & costs.
+    Robust LV topology pipeline:
+      - loads buildings (+ optional roads) in projected CRS (meters),
+      - generates candidate road poles (optional),
+      - associates buildings to road poles (capacity + radius),
+      - places new poles for remaining buildings (clustering heuristic),
+      - computes service-drop length (building -> assigned serving pole),
+      - computes MST backbone on poles and optionally densifies long spans,
+      - returns metrics + plotting/export artifacts in EPSG:4326.
 
-    Backend-only (no Streamlit dependencies). It orchestrates:
-      - reading the data,
-      - running heuristics (association + clustering),
-      - computing and densifying the MST,
-      - assembling a results dictionary for the UI.
-
-    Parameters
-    ----------
-    users_file : file-like
-        Uploaded file handle (.gpkg or .xlsx) with user locations.
-    roads_file : file-like or None
-        Uploaded file handle (.gpkg) for roads, or None.
-    sampling_distance : float
-        Distance between candidate poles along roads [m].
-    user_distance : float
-        Maximum radius to associate users to a pole [m].
-    max_associations : int
-        Maximum number of users per pole.
-    cost_per_km : float
-        LV line cost per kilometer [USD/km].
-    fixed_costs : float
-        Additional fixed costs [USD].
-    centroid_hint : (lat, lon), optional
-        Optional map center override in EPSG:4326.
-    allow_unserved_isolated : bool, optional
-        If True, small / isolated building clusters (below min_cluster_size)
-        can remain unserved (standalone candidates).
-    min_cluster_size : int, optional
-        Minimum cluster size for LV pole placement when
-        allow_unserved_isolated=True.
-    max_pole_span_m : float or None, optional
-        If provided and > 0, long MST edges are post-processed:
-        any edge > max_pole_span_m is subdivided with intermediate
-        support poles. Connectivity is preserved (single tree).
-
-    Returns
-    -------
-    dict
-        {
-            "metrics": {...},
-            "gdf_buildings_4326": GeoDataFrame,
-            "gdf_poles_4326": GeoDataFrame,
-            "gdf_roads_4326": GeoDataFrame or None,
-            "gdf_served_4326": GeoDataFrame,
-            "gdf_unserved_4326": GeoDataFrame,
-            "mst_edges_latlon": list[((lat1, lon1), (lat2, lon2))],
-            "downloads": {
-                "nodes_geojson": BytesIO,
-                "edges_geojson": BytesIO,
-            },
-            "center": (lat, lon),
-        }
+    Metrics include:
+      - total length, backbone length, service-drop length
+      - total poles, serving poles, support poles (added by densification)
+      - buildings served/unserved (standalone candidates)
     """
+
     # ------------------------------------------------------------------
     # 1) Load data in projected CRS (meters)
     # ------------------------------------------------------------------
@@ -97,6 +56,16 @@ def run_low_voltage(
 
     if gdf_buildings is None or gdf_buildings.empty:
         raise ValueError("Users file could not be loaded or is empty.")
+    if gdf_buildings.geometry.isna().any():
+        raise ValueError("Users file contains missing geometries.")
+    if getattr(gdf_buildings.crs, "is_geographic", False):
+        # load_and_transform_data should handle reprojection; this is just a safety belt
+        raise ValueError("Buildings are still in a geographic CRS; expected projected CRS in meters.")
+
+    # Ensure stable building IDs (do NOT reset index if you rely on input IDs elsewhere)
+    # Here we assume index is a valid building_id universe.
+    bldg_geom_by_id = gdf_buildings.geometry.to_dict()
+    bldg_wkb_to_id = {geom.wkb: idx for idx, geom in bldg_geom_by_id.items()}
 
     # ------------------------------------------------------------------
     # 2) Candidate poles from roads (if any)
@@ -109,23 +78,37 @@ def run_low_voltage(
             else gpd.GeoDataFrame(geometry=[], crs=gdf_buildings.crs)
         )
     else:
-        # Start with no poles; all will be created from unassociated buildings
         gdf_associated_poles = gpd.GeoDataFrame(geometry=[], crs=gdf_buildings.crs)
 
     # ------------------------------------------------------------------
     # 3) Associate buildings to existing (road-based) poles
+    #     IMPORTANT: enforce stable pole IDs = row positions 0..N-1
     # ------------------------------------------------------------------
     if not gdf_associated_poles.empty:
+        gdf_associated_poles = gdf_associated_poles.reset_index(drop=True)
+
         associations_df = associate_buildings_to_poles(
             gdf_buildings=gdf_buildings,
             gdf_poles=gdf_associated_poles,
             user_distance=user_distance,
             max_associations=max_associations,
         )
-        # Keep only poles that actually got at least one association
-        gdf_associated_poles = gdf_associated_poles[
-            gdf_associated_poles.index.isin(associations_df["pole_id"])
-        ].copy()
+
+        if not associations_df.empty:
+            associations_df = associations_df[["pole_id", "building_id"]].dropna().drop_duplicates()
+
+            # Keep only poles that got >=1 building (POSITION-BASED)
+            kept_old_ids = sorted(associations_df["pole_id"].astype(int).unique().tolist())
+            gdf_associated_poles = gdf_associated_poles.iloc[kept_old_ids].reset_index(drop=True)
+
+            # Remap pole IDs to compact 0..(n_kept-1)
+            remap = {old: new for new, old in enumerate(kept_old_ids)}
+            associations_df["pole_id"] = associations_df["pole_id"].map(remap).astype(int)
+            associations_df["building_id"] = associations_df["building_id"].astype(int)
+        else:
+            # No building attached to road candidates -> treat them as unused candidates
+            gdf_associated_poles = gdf_associated_poles.iloc[0:0].copy()
+            associations_df = pd.DataFrame(columns=["pole_id", "building_id"])
     else:
         associations_df = pd.DataFrame(columns=["pole_id", "building_id"])
 
@@ -144,33 +127,70 @@ def run_low_voltage(
         min_cluster_size=min_cluster_size,
     )
 
-    # Final pole set (roads-based + newly placed)
-    gdf_final_poles = pd.concat([gdf_associated_poles, gdf_new_poles])
+    # Ensure gdf_new_poles has a clean local RangeIndex for any fallback logic
+    gdf_new_poles = gdf_new_poles.reset_index(drop=True)
 
-    # Map new associations to final pole indices
+    # Final pole set (roads-based + newly placed) with stable 0..N-1 IDs
+    gdf_final_poles = pd.concat([gdf_associated_poles, gdf_new_poles], ignore_index=True).reset_index(
+        drop=True
+    )
+
+    if gdf_final_poles.empty:
+        raise ValueError("No poles could be placed; check input data and parameters.")
+
+    # ------------------------------------------------------------------
+    # 4b) Append new associations with robust (pole, building) -> ids mapping
+    # ------------------------------------------------------------------
     if len(new_associations) > 0:
-        # new_associations is list of (pole_point, building_geom)
+        # new_associations: list[(pole_point, building_geom)]
         new_df = pd.DataFrame(new_associations, columns=["pole", "building_geom"])
 
-        # Map pole geometry -> index in gdf_final_poles
-        new_df["pole_id"] = new_df["pole"].apply(
-            lambda p: gdf_final_poles[gdf_final_poles.geometry == p].index[0]
-        )
+        # pole geom -> local index within gdf_new_poles
+        new_pole_wkb_to_local = {geom.wkb: i for i, geom in enumerate(gdf_new_poles.geometry)}
+        offset = len(gdf_associated_poles)  # final poles = [associated | new]
 
-        # Map building geometry -> index in gdf_buildings
-        new_df["building_id"] = new_df["building_geom"].apply(
-            lambda g: gdf_buildings[gdf_buildings.geometry == g].index[0]
-        )
+        def _safe_lookup_new_pole_local_id(p: Point) -> int:
+            k = p.wkb
+            if k in new_pole_wkb_to_local:
+                return int(new_pole_wkb_to_local[k])
+            # fallback: nearest match (defensive)
+            if len(gdf_new_poles) == 0:
+                raise ValueError("Internal error: new_associations provided but gdf_new_poles is empty.")
+            dists = gdf_new_poles.geometry.distance(p)
+            return int(dists.idxmin())
 
-        new_assoc_ids = new_df[["pole_id", "building_id"]]
+        def _safe_lookup_building_id(g: Point) -> int:
+            k = g.wkb
+            if k in bldg_wkb_to_id:
+                return int(bldg_wkb_to_id[k])
+            # fallback: nearest building (defensive)
+            dists = gdf_buildings.geometry.distance(g)
+            return int(dists.idxmin())
 
-        if "building_id" not in associations_df.columns:
-            associations_df["building_id"] = pd.Series(dtype=int)
+        new_df["pole_id"] = new_df["pole"].apply(lambda p: offset + _safe_lookup_new_pole_local_id(p))
+        new_df["building_id"] = new_df["building_geom"].apply(_safe_lookup_building_id)
+
+        new_assoc_ids = new_df[["pole_id", "building_id"]].dropna().drop_duplicates()
+        new_assoc_ids["pole_id"] = new_assoc_ids["pole_id"].astype(int)
+        new_assoc_ids["building_id"] = new_assoc_ids["building_id"].astype(int)
 
         associations_df = pd.concat(
             [associations_df[["pole_id", "building_id"]], new_assoc_ids],
             ignore_index=True,
         )
+
+    # Final cleanup + validation of associations
+    if not associations_df.empty:
+        associations_df = associations_df[["pole_id", "building_id"]].dropna().drop_duplicates()
+        associations_df["pole_id"] = associations_df["pole_id"].astype(int)
+        associations_df["building_id"] = associations_df["building_id"].astype(int)
+
+        max_pid = int(associations_df["pole_id"].max())
+        if max_pid >= len(gdf_final_poles):
+            raise ValueError(
+                f"Pole ID mismatch: associations refer to pole_id={max_pid} "
+                f"but only {len(gdf_final_poles)} poles exist."
+            )
 
     # ------------------------------------------------------------------
     # 5) Served vs unserved buildings
@@ -182,23 +202,35 @@ def run_low_voltage(
 
     unserved_ids = set(gdf_unserved.index)
     served_ids = [idx for idx in gdf_buildings.index if idx not in unserved_ids]
-    gdf_served = (
-        gdf_buildings.loc[served_ids] if len(served_ids) > 0 else gdf_buildings.iloc[0:0]
-    )
+    gdf_served = gdf_buildings.loc[served_ids] if served_ids else gdf_buildings.iloc[0:0]
 
-    num_buildings = len(gdf_buildings)
-    num_served = len(gdf_served)
-    num_unserved = len(gdf_unserved)
+    num_buildings = int(len(gdf_buildings))
+    num_served = int(len(gdf_served))
+    num_unserved = int(len(gdf_unserved))
+
+    # ------------------------------------------------------------------
+    # 5b) Service drops length (building -> assigned pole)
+    # ------------------------------------------------------------------
+    service_drop_length_m = 0.0
+    if not associations_df.empty:
+        pole_geom_by_id = gdf_final_poles.geometry.to_dict()  # pole_id -> Point
+
+        assoc = associations_df[["pole_id", "building_id"]].dropna().drop_duplicates()
+        for pole_id, building_id in assoc.itertuples(index=False):
+            pole_geom = pole_geom_by_id.get(int(pole_id))
+            bldg_geom = bldg_geom_by_id.get(int(building_id))
+            if pole_geom is None or bldg_geom is None:
+                continue
+            service_drop_length_m += float(pole_geom.distance(bldg_geom))
+
+    service_drop_length_km = service_drop_length_m / 1000.0
+    serving_poles = int(associations_df["pole_id"].nunique()) if not associations_df.empty else 0
 
     # ------------------------------------------------------------------
     # 6) MST in projected CRS + densification of long spans
     # ------------------------------------------------------------------
-    if gdf_final_poles.empty:
-        raise ValueError("No poles could be placed; check input data and parameters.")
-
     mst_base: nx.Graph = create_graph_and_mst(gdf_final_poles)
 
-    # Densify MST edges if requested (post-processing)
     gdf_poles_densified, mst = densify_mst_edges(
         gdf_poles=gdf_final_poles,
         mst=mst_base,
@@ -206,14 +238,15 @@ def run_low_voltage(
     )
 
     # ------------------------------------------------------------------
-    # 7) Length & costs (using densified MST)
+    # 7) Backbone length + totals
     # ------------------------------------------------------------------
-    length_m = sum(nx.get_edge_attributes(mst, "weight").values())
-    length_km = length_m / 1000.0
-    total_lv_cost = length_km * cost_per_km + float(fixed_costs)
+    backbone_length_m = float(sum(nx.get_edge_attributes(mst, "weight").values()))
+    backbone_length_km = backbone_length_m / 1000.0
+    total_network_length_km = backbone_length_km + service_drop_length_km
 
-    num_poles_code = len(gdf_poles_densified)
-    num_poles_length = math.ceil((length_km * 1000.0) / sampling_distance)
+    total_poles = int(len(gdf_poles_densified))
+    base_poles = int(len(gdf_final_poles))
+    support_poles = int(max(0, total_poles - base_poles))
 
     # ------------------------------------------------------------------
     # 8) Reproject outputs to EPSG:4326 for plotting
@@ -222,12 +255,8 @@ def run_low_voltage(
     gdf_poles_4326 = gdf_poles_densified.to_crs(epsg=4326)
     gdf_roads_4326 = gdf_roads.to_crs(epsg=4326) if gdf_roads is not None else None
 
-    gdf_served_4326 = (
-        gdf_served.to_crs(epsg=4326) if num_served > 0 else gdf_buildings_4326.iloc[0:0]
-    )
-    gdf_unserved_4326 = (
-        gdf_unserved.to_crs(epsg=4326) if num_unserved > 0 else gdf_buildings_4326.iloc[0:0]
-    )
+    gdf_served_4326 = gdf_served.to_crs(epsg=4326) if num_served > 0 else gdf_buildings_4326.iloc[0:0]
+    gdf_unserved_4326 = gdf_unserved.to_crs(epsg=4326) if num_unserved > 0 else gdf_buildings_4326.iloc[0:0]
 
     # ------------------------------------------------------------------
     # 9) Map center
@@ -257,11 +286,16 @@ def run_low_voltage(
     # ------------------------------------------------------------------
     return {
         "metrics": {
-            "network_length_km": length_km,
-            "total_lv_cost_usd": total_lv_cost,
+            # Lengths
+            "total_network_length_km": total_network_length_km,
+            "backbone_length_km": backbone_length_km,
+            "service_drop_length_km": service_drop_length_km,
+            # Poles breakdown
+            "num_poles_total": total_poles,
+            "num_poles_serving": serving_poles,
+            "num_poles_support": support_poles,
+            # Buildings breakdown
             "num_buildings": num_buildings,
-            "num_poles_code": num_poles_code,
-            "num_poles_length": num_poles_length,
             "num_served": num_served,
             "num_unserved": num_unserved,
         },
