@@ -91,7 +91,9 @@ def _make_map_lv(
 
     - Roads: grey lines
     - MST edges: blue-ish lines
-    - Poles: black markers
+    - Serving poles: black filled
+    - Support poles: dark gray outline + light fill
+    - Non-serving base poles: small black dots (optional)
     - Grid-served buildings: green markers
     - Standalone candidates: red markers
     """
@@ -127,14 +129,44 @@ def _make_map_lv(
             if latlon is None:
                 continue
             y, x = latlon
-            CircleMarker(
-                location=[y, x],
-                radius=3,
-                color="black",
-                fill=True,
-                fill_color="black",
-                fill_opacity=1.0,
-            ).add_to(m)
+
+            pole_type = str(row.get("pole_type", "base")).strip().lower()
+
+            if pole_type == "support":
+                CircleMarker(
+                    location=[y, x],
+                    radius=4,
+                    color="#555555",
+                    weight=3,
+                    fill=True,
+                    fill_color="#BBBBBB",
+                    fill_opacity=0.9,
+                    tooltip="Support pole",
+                ).add_to(m)
+
+            elif pole_type == "serving":
+                CircleMarker(
+                    location=[y, x],
+                    radius=4,
+                    color="black",
+                    weight=2,
+                    fill=True,
+                    fill_color="black",
+                    fill_opacity=1.0,
+                    tooltip="Serving pole",
+                ).add_to(m)
+
+            else:  # "non_serving" or "base"
+                CircleMarker(
+                    location=[y, x],
+                    radius=2,
+                    color="black",
+                    weight=1,
+                    fill=True,
+                    fill_color="black",
+                    fill_opacity=0.7,
+                    tooltip="Non-serving pole",
+                ).add_to(m)
 
     # Grid-served buildings (green)
     if gdf_served is not None and not gdf_served.empty:
@@ -170,23 +202,24 @@ def _make_map_lv(
 
     return m
 
-
 def _render_downloads(downloads: Dict[str, Any]) -> None:
     if not downloads:
         return
 
     nodes = downloads.get("nodes_geojson")
     edges = downloads.get("edges_geojson")
+    assoc = downloads.get("associations_csv")
 
-    if not nodes and not edges:
+    if not nodes and not edges and not assoc:
         return
 
     st.subheader("Download outputs")
 
     st.text(
-        "Export the estimated LV backbone topology as GeoJSON files for use in GIS software. "
-        "Nodes represent pole locations (including support poles), while edges represent the "
-        "pole-to-pole feeder network. Service drops to individual buildings are not included."
+        "Export LV topology as GeoJSON files (for GIS) and the building-to-pole association CSV.\n"
+        "- Nodes include pole_id and pole_type (serving / non_serving / support)\n"
+        "- Edges represent the pole-to-pole MST network\n"
+        "- associations.csv maps each served building_id to its serving pole_id (support poles excluded by design)."
     )
 
     if nodes:
@@ -205,7 +238,13 @@ def _render_downloads(downloads: Dict[str, Any]) -> None:
             mime="application/geo+json",
         )
 
-
+    if assoc:
+        st.download_button(
+            "Download building → pole associations (CSV)",
+            data=assoc,
+            file_name="associations.csv",
+            mime="text/csv",
+        )
 
 def _show_lv_results(results: Dict[str, Any]) -> None:
     _metric_row(results["metrics"])
@@ -213,7 +252,7 @@ def _show_lv_results(results: Dict[str, Any]) -> None:
     st.subheader("Distribution map")
     st.caption(
         "Green = grid-served buildings; Red = standalone candidates; "
-        "Black = poles; Blue = LV network (MST)."
+        "Black = serving poles; Gray = support poles; Blue = LV network (MST)."
     )
 
     m = _make_map_lv(
@@ -227,7 +266,6 @@ def _show_lv_results(results: Dict[str, Any]) -> None:
     st_folium(m, height=600, width=900)
 
     _render_downloads(results.get("downloads", {}))
-
 
 # ---------------------------------------------------------------------
 # Main UI
@@ -246,7 +284,7 @@ def main() -> None:
             """
             1. **Upload users file** (required)  
             2. (Optional) upload **roads file** if you want poles to follow roads  
-            3. Adjust **cost** and **heuristic** parameters  
+            3. Adjust **heuristic** parameters  
             4. Choose whether to **allow isolated buildings to remain unserved**  
             5. Click **Run LV design**  
             6. Inspect the map and download GeoJSON outputs
@@ -373,7 +411,7 @@ def main() -> None:
 
     max_pole_span_m = st.slider(
         "Max LV span between poles (engineering cap) [m]",
-        min_value=20,
+        min_value=road_pole_spacing_m,  # cannot be smaller than the sampling distance
         max_value=150,
         value=80,
         step=5,
