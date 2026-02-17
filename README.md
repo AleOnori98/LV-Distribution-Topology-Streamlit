@@ -91,9 +91,9 @@ This step improves spatial consistency between network geometry and customer con
 
 The final network therefore distinguishes:
 
-- **Serving poles** — poles with at least one connected building  
-- **Support poles** — poles inserted for span control with no direct connections  
-- **Non-serving base poles** — original poles that ended up unused after reassignment  
+- **Serving poles**: poles with at least one connected building  
+- **Support poles**: poles inserted for span control with no direct connections  
+- **Non-serving base poles**: original poles that ended up unused after reassignment  
 
 Importantly, the underlying LV routing remains unchanged - only the allocation of customers to poles is refined.
 
