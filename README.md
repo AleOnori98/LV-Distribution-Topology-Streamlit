@@ -10,7 +10,7 @@ The application takes as input:
 - A set of **building / customer connection points** (required)
 - An optional **road network** (GeoPackage)
 
-Using a combination of **heuristic pole placement** and **graph-based optimization**, the app constructs a **single connected LV network** and provides:
+Using a combination of **heuristic pole placement** and **graph-based optimization**, the app constructs a **single connected radial LV network** and allocates customers to poles using engineering-informed heuristics. It features:
 - An interactive map of poles, LV lines, and customers
 - Summary metrics (length, poles, served vs standalone)
 - Downloadable GeoJSON outputs for further GIS analysis
@@ -127,10 +127,16 @@ The main parameters exposed in the interface are:
 ### Interactive map
 
 The app displays an interactive map with clear visual encoding:
+- **Green points**: grid-served buildings  
+- **Red points**: standalone candidates (unserved)  
+- **Black markers**: serving poles  
+- **Dark gray markers**: support poles (no direct connections)  
+- **Blue lines**: LV backbone network (MST)  
 
 <p align="left">
   <img src="config/assets/results_map.png" width="600" alt="Distribution map example">
 </p>
+
 
 ### Summary metrics
 
