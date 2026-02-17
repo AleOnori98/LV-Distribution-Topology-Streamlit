@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import io
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 import geopandas as gpd
 import networkx as nx
@@ -185,7 +185,6 @@ def place_poles_for_unassociated_buildings(
 # ---------------------------------------------------------------------
 # Graph + MST + exports
 # ---------------------------------------------------------------------
-
 def create_graph_and_mst(gdf_poles: gpd.GeoDataFrame) -> nx.Graph:
     """
     Create a complete graph over poles using Euclidean distance as edge weight,
@@ -220,32 +219,45 @@ def save_mst_to_geojson(
     gdf_poles: gpd.GeoDataFrame, mst: nx.Graph
 ) -> Tuple[io.BytesIO, io.BytesIO]:
     """
-    Export MST nodes and edges to GeoJSON and return as in-memory buffers.
-
-    Returns
-    -------
-    nodes_geojson, edges_geojson : BytesIO
-        Can be passed directly to Streamlit's download_button.
+    Export MST nodes/edges to GeoJSON. Nodes include:
+      - pole_id
+      - pole_type
+      - pole_origin
     """
-    # Nodes
-    nodes_records = [{"id": idx, "geometry": pole.geometry}
-                     for idx, pole in enumerate(gdf_poles.itertuples())]
-    gdf_nodes = gpd.GeoDataFrame(nodes_records, crs=gdf_poles.crs)
+    poles = gdf_poles.copy().reset_index(drop=True)
+    if "pole_id" not in poles.columns:
+        poles["pole_id"] = poles.index.astype(int)
+    if "pole_type" not in poles.columns:
+        poles["pole_type"] = "base"
+    if "pole_origin" not in poles.columns:
+        poles["pole_origin"] = "base"
 
-    # Edges
+    nodes_records = []
+    for idx, pole in enumerate(poles.itertuples()):
+        nodes_records.append(
+            {
+                "node": int(idx),  # graph node id (row index)
+                "pole_id": int(getattr(pole, "pole_id")),
+                "pole_type": str(getattr(pole, "pole_type")),
+                "pole_origin": str(getattr(pole, "pole_origin")),
+                "geometry": pole.geometry,
+            }
+        )
+    gdf_nodes = gpd.GeoDataFrame(nodes_records, crs=poles.crs)
+
     edges_records = []
     for u, v, data in mst.edges(data=True):
-        start = gdf_poles.geometry.iloc[u]
-        end = gdf_poles.geometry.iloc[v]
+        start = poles.geometry.iloc[u]
+        end = poles.geometry.iloc[v]
         edges_records.append(
             {
-                "source": u,
-                "target": v,
-                "weight": data["weight"],
+                "source": int(u),
+                "target": int(v),
+                "weight": float(data["weight"]),
                 "geometry": LineString([start, end]),
             }
         )
-    gdf_edges = gpd.GeoDataFrame(edges_records, crs=gdf_poles.crs)
+    gdf_edges = gpd.GeoDataFrame(edges_records, crs=poles.crs)
 
     nodes_buf = io.BytesIO()
     gdf_nodes.to_file(nodes_buf, driver="GeoJSON")
@@ -260,123 +272,101 @@ def save_mst_to_geojson(
 # ---------------------------------------------------------------------
 # MST post-processing
 # ---------------------------------------------------------------------
-
 def densify_mst_edges(
     gdf_poles: gpd.GeoDataFrame,
     mst: nx.Graph,
     max_pole_span_m: float,
 ) -> Tuple[gpd.GeoDataFrame, nx.Graph]:
     """
-    Post-process an MST by splitting edges longer than `max_pole_span_m`
-    into multiple segments, inserting intermediate support poles.
+    Split MST edges longer than `max_pole_span_m` by inserting intermediate poles.
 
-    - Keeps a single connected tree (still acyclic).
-    - Does NOT change which poles serve which buildings.
-    - New nodes are "support poles" only; no buildings are attached.
-
-    Parameters
-    ----------
-    gdf_poles : GeoDataFrame
-        Original pole locations in projected CRS (meters).
-        Row order must match the MST node IDs (0..N-1) as created by
-        `create_graph_and_mst`.
-    mst : nx.Graph
-        Minimum spanning tree over the original poles.
-    max_pole_span_m : float
-        Maximum desired span length between consecutive poles [m].
-        Edges longer than this will be subdivided.
-
-    Returns
-    -------
-    gdf_poles_densified : GeoDataFrame
-        New pole set including original poles + additional support poles.
-        Index is RangeIndex(0..N'-1) and matches node IDs in `mst_densified`.
-    mst_densified : nx.Graph
-        Tree graph whose edges all have weight <= max_pole_span_m
-        (up to numerical tolerance).
+    Output schema guarantees:
+      - pole_id: stable unique integer id (preserved for base poles, new for inserted poles)
+      - pole_type: preserved for base poles; inserted poles start as "support"
+      - pole_origin: "base" for input poles, "inserted" for new poles
     """
     if max_pole_span_m is None or max_pole_span_m <= 0:
-        # No densification requested
-        return gdf_poles, mst
+        out = gdf_poles.copy().reset_index(drop=True)
+        if "pole_id" not in out.columns:
+            out["pole_id"] = out.index.astype(int)
+        if "pole_type" not in out.columns:
+            out["pole_type"] = "base"
+        if "pole_origin" not in out.columns:
+            out["pole_origin"] = "base"
+        return out, mst
 
-    # ------------------------------------------------------------------
-    # 1) Reconstruct base geometry list in MST node order
-    # ------------------------------------------------------------------
-    base_geoms: List[Point] = [row.geometry for row in gdf_poles.itertuples()]
+    base = gdf_poles.copy().reset_index(drop=True)
+    if "pole_id" not in base.columns:
+        base["pole_id"] = base.index.astype(int)
+    if "pole_type" not in base.columns:
+        base["pole_type"] = "base"
+    if "pole_origin" not in base.columns:
+        base["pole_origin"] = "base"
+
+    base_geoms: List[Point] = [row.geometry for row in base.itertuples()]
     n_base = len(base_geoms)
 
     if n_base != mst.number_of_nodes():
         raise ValueError(
-            "Inconsistent MST: number of nodes in MST does not match "
-            "number of poles in gdf_poles."
+            "Inconsistent MST: number of nodes in MST does not match number of poles in gdf_poles."
         )
 
-    # new_geoms will hold both original and support poles
-    new_geoms: List[Point] = list(base_geoms)
-
-    # New graph with densified edges
     G2 = nx.Graph()
-
-    # Add original nodes
     for node_id in range(n_base):
         G2.add_node(node_id)
 
+    new_rows: List[Dict[str, Any]] = []
+    next_pole_id = int(base["pole_id"].max()) + 1
     next_node_id = n_base
 
-    # ------------------------------------------------------------------
-    # 2) For each MST edge, split if needed and build the chain
-    # ------------------------------------------------------------------
     for u, v, data in mst.edges(data=True):
         p_u: Point = base_geoms[u]
         p_v: Point = base_geoms[v]
         d = float(data.get("weight", p_u.distance(p_v)))
 
-        # Short enough: keep as is
         if d <= max_pole_span_m:
             G2.add_edge(u, v, weight=d)
             continue
 
-        # Too long: subdivide into multiple segments
-        n_segments = int(math.ceil(d / max_pole_span_m))
-        if n_segments < 2:
-            n_segments = 2  # safety, but should not happen
-
+        n_segments = max(2, int(math.ceil(d / max_pole_span_m)))
         line = LineString([p_u, p_v])
 
         prev_node = u
         prev_point = p_u
 
-        # Create intermediate support poles along the line
         for k in range(1, n_segments):
-            # normalized=True: position is fraction along the line
             t = k / n_segments
             pt_k: Point = line.interpolate(t, normalized=True)
 
-            # Last point corresponds to v; we only create intermediate ones
+            # Do not create a node for v itself
             if k == n_segments:
                 break
 
-            new_geoms.append(pt_k)
-            new_node_id = next_node_id
+            new_rows.append(
+                {
+                    "geometry": pt_k,
+                    "pole_id": next_pole_id,
+                    "pole_type": "support",
+                    "pole_origin": "inserted",
+                }
+            )
+            next_pole_id += 1
+
+            new_node = next_node_id
             next_node_id += 1
+            G2.add_node(new_node)
 
-            G2.add_node(new_node_id)
-            seg_len = prev_point.distance(pt_k)
-            G2.add_edge(prev_node, new_node_id, weight=seg_len)
+            seg_len = float(prev_point.distance(pt_k))
+            G2.add_edge(prev_node, new_node, weight=seg_len)
 
-            prev_node = new_node_id
+            prev_node = new_node
             prev_point = pt_k
 
-        # Connect last intermediate (or u if none) to v
-        seg_len_last = prev_point.distance(p_v)
+        seg_len_last = float(prev_point.distance(p_v))
         G2.add_edge(prev_node, v, weight=seg_len_last)
 
-    # ------------------------------------------------------------------
-    # 3) Build densified GeoDataFrame consistent with G2 node IDs
-    # ------------------------------------------------------------------
-    gdf_poles_densified = gpd.GeoDataFrame(
-        {"geometry": new_geoms},
-        crs=gdf_poles.crs,
-    )
+    gdf_support = gpd.GeoDataFrame(new_rows, crs=base.crs)
+    densified = pd.concat([base, gdf_support], ignore_index=True)
+    densified = gpd.GeoDataFrame(densified, crs=base.crs).reset_index(drop=True)
 
-    return gdf_poles_densified, G2
+    return densified, G2
