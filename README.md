@@ -2,7 +2,7 @@
 
 A lightweight, interactive **Streamlit application** for exploring **Low-Voltage (LV) distribution network topologies** starting from customer locations and optional road data.
 
-The tool is designed as a **planning and assessment aid**, not as a detailed engineering design software. Its main purpose is to help users understand how **settlement geometry**, **connection heuristics**, and **simple engineering rules** affect pole count, LV network length, and costs.
+The tool is designed as a **planning and assessment aid**, not as a detailed engineering design software. Its main purpose is to help users understand how **settlement geometry**, **connection heuristics**, and **simple engineering rules** affect pole count, LV network length, and stand-alone candidates.
 
 ## Overview
 
@@ -12,7 +12,7 @@ The application takes as input:
 
 Using a combination of **heuristic pole placement** and **graph-based optimization**, the app constructs a **single connected LV network** and provides:
 - An interactive map of poles, LV lines, and customers
-- Summary metrics (length, cost, poles, served vs standalone)
+- Summary metrics (length, poles, served vs standalone)
 - Downloadable GeoJSON outputs for further GIS analysis
 
 ## Conceptual Workflow
@@ -62,20 +62,40 @@ This guarantees:
   <img src="config/assets/distribution_methodology.png" width="800" alt="Process flow for LV distribution network design">
 </p>
 
-### 4. Engineering post-processing: pole-to-pole span control
+### 4. Engineering post-processing: pole-to-pole span control and pole promotion
 
-To avoid unrealistically long LV spans, the tool applies an optional **post-processing step**:
+To avoid unrealistically long LV spans, the tool applies a post-processing step after the initial network routing.
 
-- If any MST edge exceeds a user-defined **maximum pole-to-pole span**,  
-  the edge is subdivided by inserting intermediate **support poles**
-- This preserves:
-  - a single connected network
-  - total LV length
-- While improving:
-  - physical plausibility of individual spans
-  - pole spacing realism
+#### Span control (support pole insertion)
 
-Importantly, this step **does not change routing decisions** — it only refines the network geometry.
+If any MST edge exceeds a user-defined **maximum pole-to-pole span**, the edge is subdivided by inserting intermediate poles along the segment.
+
+These poles are initially classified as **support poles**:
+
+- They ensure realistic physical spacing
+- They preserve the original routing and total LV length
+- They do not initially serve buildings
+
+#### Promotion of support poles (service refinement)
+
+In real planning practice, once a pole is built, nearby buildings may be connected to it even if it was not part of the initial placement heuristic.
+
+To reflect this, the tool performs an optional **promotion step**:
+
+- For each inserted support pole, buildings within the user–pole connection radius are identified
+- Buildings may be reassigned from their original pole if the new pole is closer and capacity constraints allow
+- Promoted poles become **serving poles**
+- Service drop lengths are recomputed accordingly
+
+This step improves spatial consistency between network geometry and customer connections without altering the radial topology.
+
+The final network therefore distinguishes:
+
+- **Serving poles** — poles with at least one connected building  
+- **Support poles** — poles inserted for span control with no direct connections  
+- **Non-serving base poles** — original poles that ended up unused after reassignment  
+
+Importantly, the underlying LV routing remains unchanged - only the allocation of customers to poles is refined.
 
 ## Key Parameters (User Controls)
 
@@ -125,8 +145,14 @@ Key indicators are reported, including:
 The following GeoJSON files can be downloaded:
 - **LV poles (nodes)**  
 - **LV network (edges)**  
+- **associations.csv** (this file reflects the final allocation after all processing steps, including possible reassignment due to support-pole promotion).
 
-These outputs can be directly loaded into GIS software (QGIS, ArcGIS) or used in downstream analysis.
+It enables downstream analyses such as:
+
+- Service drop modeling
+- Demand aggregation per pole
+- Reliability and outage studies
+- Integration with electrical simulation tools
 
 ---
 
@@ -135,7 +161,6 @@ These outputs can be directly loaded into GIS software (QGIS, ArcGIS) or used in
 - Distances are Euclidean (not true cable routing along roads)
 - Electrical constraints (voltage drop, losses, protection) are not modeled
 - All poles are assumed equivalent (no transformer sizing differentiation)
-- Cost model is simplified (linear with LV length)
 
 Despite these simplifications, the tool provides **transparent, explainable, and reproducible** insights into LV network topology decisions.
 
