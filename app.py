@@ -96,7 +96,7 @@ st.markdown(
     """
 1. Open **Grid Topology** in the sidebar and run the LV layout from buildings and optional roads.
 2. Open **Grid Validation** to aggregate hourly loads, choose the slack bus, set line assumptions, and run the electrical check.
-3. In **Grid Validation**, run **Step 3: Grid reinforcement optimization** to compute minimum-cost line capacity upgrades on fixed topology.
+3. Open **Grid Reinforcement** to compute minimum-cost line capacity upgrades on fixed topology after PF validation.
 4. Export GeoJSON and CSV outputs when needed. Session state remains the internal source of truth while you move across pages.
 """
 )
