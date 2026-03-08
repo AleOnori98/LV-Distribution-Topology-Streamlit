@@ -17,6 +17,7 @@ class DomainEnvelope(TypedDict, total=False):
 class ProjectDomain(DomainEnvelope, total=False):
     topology_request: Dict[str, Any]
     validation_request: Dict[str, Any]
+    reinforcement_request: Dict[str, Any]
 
 
 class TopologyDomain(DomainEnvelope, total=False):
