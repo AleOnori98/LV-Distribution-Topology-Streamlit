@@ -15,7 +15,6 @@ from core.line_params import (
     read_lines_metadata_csv,
 )
 from core.pipeline_adapters import (
-    reinforcement_result_to_view_payload,
     validation_inputs_from_external_payload,
     validation_inputs_from_topology_result,
     validation_inputs_to_map_view,
@@ -26,12 +25,10 @@ from core.pipeline_state import (
     ensure_session_domains,
     get_topology_result,
     get_validation_inputs,
-    get_validation_reinforcement_result,
     get_validation_result,
     get_validation_runner_cache,
     set_project_request,
     set_validation_inputs,
-    set_validation_reinforcement_result,
     set_validation_result,
     set_validation_runner_cache,
     update_validation_line_params_state,
@@ -44,10 +41,6 @@ from core.powerflow_io import (
     read_vector,
 )
 from core.powerflow_network import PFScenarioParams, PFTopologyBundle, PyPSAPowerFlowRunner
-from core.powerflow_reinforcement import (
-    ReinforcementSettings,
-    run_reinforcement_optimization,
-)
 from core.powerflow_validation import aggregate_pole_loads, validate_external_topology
 from pages.ui_sections.validation_sections import (
     render_demand_controls,
@@ -55,8 +48,6 @@ from pages.ui_sections.validation_sections import (
     render_line_params_section,
     render_load_visualization,
     render_page_header,
-    render_reinforcement_controls,
-    render_reinforcement_results,
     render_pf_results,
     render_pf_run_controls,
     render_pf_setup_section,
@@ -625,6 +616,17 @@ if run_controls["run_clicked"]:
                 out=out,
             ),
         )
+        st.session_state["ui"]["flags"]["last_pf_run_context"] = {
+            "pf_hour": int(pf_hour),
+            "pf_min_len_m": float(run_controls["pf_min_len_m"]),
+            "pf_sn_mva": float(run_controls["pf_sn_mva"]),
+            "pf_fail_on_nonsense": bool(run_controls["pf_fail_on_nonsense"]),
+            "resolved_line_params_df": (
+                None
+                if validation_inputs.resolved_line_params_df is None
+                else validation_inputs.resolved_line_params_df.copy()
+            ),
+        }
 
         st.success("Power flow completed.")
     except Exception as e:
@@ -633,17 +635,7 @@ if run_controls["run_clicked"]:
 
 pf_result = get_validation_result(st.session_state)
 pf_result_view = validation_result_to_view_payload(pf_result)
-reinforcement_result = get_validation_reinforcement_result(st.session_state)
-reinforcement_result_view = reinforcement_result_to_view_payload(reinforcement_result)
 pf_map = None
-reinforced_line_pairs: set[tuple[int, int]] = set()
-if reinforcement_result_view is not None and not reinforcement_result_view["reinforced_lines"].empty:
-    for row in reinforcement_result_view["reinforced_lines"].to_dict(orient="records"):
-        u = pd.to_numeric(row.get("from_bus"), errors="coerce")
-        v = pd.to_numeric(row.get("to_bus"), errors="coerce")
-        if pd.notna(u) and pd.notna(v):
-            reinforced_line_pairs.add((min(int(u), int(v)), max(int(u), int(v))))
-
 if pf_result_view is not None:
     bus_v_pu: dict[int, float] = {}
     for row in pf_result_view["bus_results"].to_dict(orient="records"):
@@ -685,94 +677,10 @@ if pf_result_view is not None:
 render_pf_results(
     pf_result_view,
     pf_map=pf_map,
-    reinforced_line_pairs=reinforced_line_pairs if reinforced_line_pairs else None,
 )
 
 st.divider()
-st.subheader("Step 3: Grid reinforcement optimization (fixed topology)")
-st.markdown(
-    "Optimize line thermal upgrades on the current fixed topology and fixed load snapshot. "
-    "Topology, load allocation, and slack location remain unchanged."
+st.info(
+    "If line overloads occur, the reinforcement optimization can increase line capacities while keeping the topology fixed.\n\n"
+    "Go to the **Grid Reinforcement** page to run the optimization."
 )
-
-if pf_result_view is None:
-    st.info("Run power flow first to enable reinforcement optimization.")
-    st.stop()
-
-has_violations = bool(
-    (pf_result_view["summary"].get("num_voltage_violations", 0) or 0) > 0
-    or (
-        pd.to_numeric(pf_result_view["line_results"].get("loading_pu"), errors="coerce").fillna(0.0) > 1.0
-    ).sum()
-    > 0
-)
-rf_controls = render_reinforcement_controls(default_enabled=has_violations)
-
-if rf_controls["run_clicked"]:
-    try:
-        if (not has_violations) and (not rf_controls["run_even_if_clean"]):
-            st.info("No current PF violations detected. Enable 'run even if clean' to force optimization.")
-        else:
-            rf_hour = int(pf_result_view["hour"])
-            rf_loads = validation_inputs.pole_loads_kW.loc[rf_hour]
-            rf_pole_load_dict = {int(k): float(v) for k, v in rf_loads.to_dict().items()}
-
-            with st.spinner("Optimizing reinforcement plan..."):
-                rf_result = run_reinforcement_optimization(
-                    runner=runner,
-                    hour=rf_hour,
-                    pole_load_dict=rf_pole_load_dict,
-                    params=params,
-                    line_params_df=validation_inputs.resolved_line_params_df,
-                    settings=ReinforcementSettings(
-                        selection_mode=str(rf_controls["selection_mode"]),
-                        cost_per_km_per_kva=float(rf_controls["cost_per_km_per_kva"]),
-                        max_upgrade_factor=float(rf_controls["max_upgrade_factor"]),
-                        allow_emergency_load_shedding=bool(rf_controls["allow_emergency_load_shedding"]),
-                        shedding_penalty_per_mwh=float(rf_controls["shedding_penalty_per_mwh"]),
-                        solver_name=rf_controls["solver_name"],
-                        min_len_km=float(run_controls["pf_min_len_m"]) / 1000.0,
-                        sn_mva=float(run_controls["pf_sn_mva"]),
-                        check_nonsense=bool(run_controls["pf_fail_on_nonsense"]),
-                    ),
-                    pre_summary=dict(pf_result_view["summary"]),
-                )
-            set_validation_reinforcement_result(st.session_state, rf_result)
-            reinforcement_result_view = reinforcement_result_to_view_payload(rf_result)
-            reinforced_line_pairs = set()
-            if not reinforcement_result_view["reinforced_lines"].empty:
-                for row in reinforcement_result_view["reinforced_lines"].to_dict(orient="records"):
-                    u = pd.to_numeric(row.get("from_bus"), errors="coerce")
-                    v = pd.to_numeric(row.get("to_bus"), errors="coerce")
-                    if pd.notna(u) and pd.notna(v):
-                        reinforced_line_pairs.add((min(int(u), int(v)), max(int(u), int(v))))
-            st.success("Reinforcement optimization completed.")
-    except Exception as e:
-        st.error(f"Reinforcement optimization failed: {repr(e)}")
-        st.exception(e)
-
-rf_map = None
-if reinforcement_result_view is not None and pf_map is not None:
-    post_bus_v_pu: dict[int, float] = {}
-    for row in reinforcement_result_view["post_bus_results"].to_dict(orient="records"):
-        pid = pd.to_numeric(row.get("bus"), errors="coerce")
-        vpu = pd.to_numeric(row.get("v_pu"), errors="coerce")
-        if pd.notna(pid) and pd.notna(vpu):
-            post_bus_v_pu[int(pid)] = float(vpu)
-
-    post_line_loading_pu: dict[tuple[int, int], float] = {}
-    for row in reinforcement_result_view["post_line_results"].to_dict(orient="records"):
-        u = pd.to_numeric(row.get("bus0"), errors="coerce")
-        v = pd.to_numeric(row.get("bus1"), errors="coerce")
-        loading = pd.to_numeric(row.get("loading_pu"), errors="coerce")
-        if pd.notna(u) and pd.notna(v) and pd.notna(loading):
-            post_line_loading_pu[(int(u), int(v))] = float(loading)
-
-    rf_map = {
-        **pf_map,
-        "bus_v_pu": post_bus_v_pu,
-        "line_loading_pu": post_line_loading_pu,
-        "reinforced_line_pairs": reinforced_line_pairs,
-    }
-
-render_reinforcement_results(reinforcement_result_view, pf_map=rf_map)
