@@ -1,17 +1,33 @@
 # **LV Distribution Network - Topology Assessment**
 
-A lightweight, interactive **Streamlit application** for exploring **Low-Voltage (LV) distribution network topologies** starting from customer locations and optional road data. The tool is designed as a **planning and assessment aid**, not as a detailed engineering design software. Its main purpose is to help users understand how **settlement geometry**, **connection heuristics**, and **simple engineering rules** affect pole count, LV network length, and stand-alone candidates.
+<p align="center">
+  <img src="config/assets/distribution_methodology.png" width="500" alt="Process flow for LV distribution network design">
+</p>
+
+---
+
+A lightweight, interactive **Streamlit application** for planning and checking **Low-Voltage (LV) distribution networks** starting from customer locations and optional road data.
+
+The tool is designed as a **planning and assessment aid**, not as a detailed engineering design software. Its main purpose is to help users understand how **settlement geometry**, **connection heuristics**, and **simple engineering rules** affect pole count, LV network length, and electrical feasibility.
+
+---
 
 ## Overview
 
-The application takes as input:
-- A set of **building / customer connection points** (required)
-- An optional **road network** (GeoPackage)
+The application supports a 3-step workflow:
+- **Step 1: Grid Topology**
+  Build a heuristic pole-and-line layout from users and optional roads.
+- **Step 2: Grid Validation**
+  Aggregate demand to poles and run single-snapshot power flow checks.
+- **Step 3: Grid Reinforcement (fixed topology)**
+  Optimize line-capacity upgrades on existing edges only, then re-check PF.
 
-Using a combination of **heuristic pole placement** and **graph-based optimization**, the app constructs a **single connected radial LV network** and allocates customers to poles using engineering-informed heuristics. It features:
-- An interactive map of poles, LV lines, and customers
-- Summary metrics (length, poles, served vs standalone)
-- Downloadable GeoJSON outputs for further GIS analysis
+Core outputs include:
+- Interactive maps (topology, load, PF status, reinforced lines)
+- Summary metrics (lengths, served vs standalone, PF violations, loading)
+- Downloadable GeoJSON/CSV artifacts for GIS and post-processing
+
+---
 
 ## Conceptual Workflow
 
@@ -33,6 +49,7 @@ During this stage, buildings are associated to poles subject to:
 
 Additional poles are iteratively created to serve buildings that remain unassociated.
 
+---
 
 ### 2. Optional selective coverage (standalone candidates)
 
@@ -42,6 +59,8 @@ The tool can optionally allow **very small or isolated clusters** of buildings t
 - These buildings are flagged as **standalone system candidates**
 
 This feature enables more realistic modeling of sparse settlements, where extending LV infrastructure may not be economically or technically justified.
+
+---
 
 ### 3. LV network routing (Minimum Spanning Tree)
 
@@ -56,44 +75,44 @@ This guarantees:
 - No loops
 - Minimum total LV conductor length for the given pole locations
 
-<p align="center">
-  <img src="config/assets/distribution_methodology.png" width="800" alt="Process flow for LV distribution network design">
-</p>
+---
 
-### 4. Engineering post-processing: pole-to-pole span control and pole promotion
+### 4. Engineering post-processing: pole-to-pole span control
 
-To avoid unrealistically long LV spans, the tool applies a post-processing step after the initial network routing.
+To avoid unrealistically long LV spans, the tool applies an optional **post-processing step**:
 
-#### Span control (support pole insertion)
+- If any MST edge exceeds a user-defined **maximum pole-to-pole span**,  
+  the edge is subdivided by inserting intermediate **support poles**
+- This preserves:
+  - a single connected network
+  - total LV length
+- While improving:
+  - physical plausibility of individual spans
+  - pole spacing realism
 
-If any MST edge exceeds a user-defined **maximum pole-to-pole span**, the edge is subdivided by inserting intermediate poles along the segment.
+Importantly, this step **does not change routing decisions** — it only refines the network geometry.
 
-These poles are initially classified as **support poles**:
+---
 
-- They ensure realistic physical spacing
-- They preserve the original routing and total LV length
-- They do not initially serve buildings
+### 5. Electrical validation (single snapshot PF)
 
-#### Promotion of support poles (service refinement)
+After topology is available (from session or external files), the app can:
+- Aggregate hourly demand from `building_metadata.csv` + `category_profiles.csv`
+- Select slack/plant bus and electrical assumptions
+- Assign line parameters (global defaults or catalog-based)
+- Run a single-snapshot PF and report voltage/loading violations
 
-In real planning practice, once a pole is built, nearby buildings may be connected to it even if it was not part of the initial placement heuristic.
+---
 
-To reflect this, the tool performs an optional **promotion step**:
+### 6. Fixed-topology reinforcement optimization
 
-- For each inserted support pole, buildings within the user–pole connection radius are identified
-- Buildings may be reassigned from their original pole if the new pole is closer and capacity constraints allow
-- Promoted poles become **serving poles**
-- Service drop lengths are recomputed accordingly
+If PF indicates overloads or voltage issues (or if the user runs it manually), the app can optimize reinforcement by:
+- Keeping topology, demand distribution, and slack location fixed
+- Allowing line thermal capacity expansion on existing edges only
+- Minimizing upgrade cost with a simple cost-per-(km*kVA) model
+- Running a post-optimization PF re-check and reporting pre/post KPIs
 
-This step improves spatial consistency between network geometry and customer connections without altering the radial topology.
-
-The final network therefore distinguishes:
-
-- **Serving poles**: poles with at least one connected building  
-- **Support poles**: poles inserted for span control with no direct connections  
-- **Non-serving base poles**: original poles that ended up unused after reassignment  
-
-Importantly, the underlying LV routing remains unchanged - only the allocation of customers to poles is refined.
+---
 
 ## Key Parameters (User Controls)
 
@@ -120,51 +139,44 @@ The main parameters exposed in the interface are:
 - **Max LV span between poles [m]**  
   Maximum allowed pole-to-pole span; longer segments are subdivided with support poles
 
+---
+
 ## Outputs
 
 ### Interactive map
 
 The app displays an interactive map with clear visual encoding:
-- **Green points**: grid-served buildings  
-- **Red points**: standalone candidates (unserved)  
-- **Black markers**: serving poles  
-- **Dark gray markers**: support poles (no direct connections)  
-- **Blue lines**: LV backbone network (MST)  
 
-<p align="left">
-  <img src="config/assets/results_map.png" width="600" alt="Distribution map example">
-</p>
-
+- **Green points** – buildings served by LV  
+- **Red points** – standalone system candidates (if enabled)  
+- **Black points** – poles (including support poles)  
+- **Blue lines** – LV network (Minimum Spanning Tree)
 
 ### Summary metrics
 
 Key indicators are reported, including:
 - Total LV network length
-- Total LV cost
 - Number of buildings (total / grid-served / standalone)
 - Number of poles
+- PF voltage/loading violations
+- Reinforcement added capacity and estimated cost (Step 3)
 
 ### Downloadable GIS outputs
 
 The following GeoJSON files can be downloaded:
 - **LV poles (nodes)**  
 - **LV network (edges)**  
-- **associations.csv** (this file reflects the final allocation after all processing steps, including possible reassignment due to support-pole promotion).
 
-It enables downstream analyses such as:
-
-- Service drop modeling
-- Demand aggregation per pole
-- Reliability and outage studies
-- Integration with electrical simulation tools
+These outputs can be directly loaded into GIS software (QGIS, ArcGIS) or used in downstream analysis.
 
 ---
 
 ## Limitations and Scope
 
 - Distances are Euclidean (not true cable routing along roads)
-- Electrical constraints (voltage drop, losses, protection) are not modeled
-- All poles are assumed equivalent (no transformer sizing differentiation)
+- Topology stage is heuristic and does not perform detailed engineering design.
+- PF stage is single-snapshot and intended for screening, not full operational studies.
+- Reinforcement stage currently focuses on thermal capacity expansion on fixed edges; voltage issues may still persist in some cases.
 
 Despite these simplifications, the tool provides **transparent, explainable, and reproducible** insights into LV network topology decisions.
 
@@ -177,6 +189,8 @@ Despite these simplifications, the tool provides **transparent, explainable, and
 ```bash
 conda env create -f environment.yml
 conda activate mgpy_distribution
+
+```
 
 ### **Running**
 
@@ -200,8 +214,8 @@ http://localhost:8501
 Based on original work by **Edoardo Silvestri**
 
 Technical Advisors  
-- Riccardo Mereu - Politecnico di Milano  
-- Emanuela Colombo - Politecnico di Milano
+- Riccardo Mereu — Politecnico di Milano  
+- Emanuela Colombo — Politecnico di Milano
 
 ---
 

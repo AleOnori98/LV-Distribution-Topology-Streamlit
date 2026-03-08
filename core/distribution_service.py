@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Tuple, List
-import math
 
 import geopandas as gpd
 import networkx as nx
@@ -17,6 +16,8 @@ from .distribution_algos import (
     densify_mst_edges,
     mst_edges_as_latlon,
     save_mst_to_geojson,
+    deduplicate_poles_with_remap,
+    merge_graph_nodes_with_remap,
 )
 
 
@@ -112,10 +113,32 @@ def run_low_voltage(
     if gdf_final_poles.empty:
         raise ValueError("No poles could be placed; check input data and parameters.")
 
-    # stable ids + origin
+    # stable ids + origin (create, then deduplicate in projected CRS)
     gdf_final_poles["pole_id"] = gdf_final_poles.index.astype(int)
     gdf_final_poles["pole_origin"] = "base"
-    gdf_final_poles["pole_type"] = "base"  # temporary; we’ll set serving/non_serving after associations
+    gdf_final_poles["pole_type"] = "base"  # temporary; serving/non-serving set after associations
+
+    # ------------------------------------------------------------------
+    # 4a) Deduplicate near-coincident poles (prevents degenerate MST edges)
+    # ------------------------------------------------------------------
+    # Recommended tolerance: 0.5–1.0 m depending on input cleanliness
+    DEDUP_TOL_M = 0.75
+
+    gdf_final_poles, associations_df, pole_id_remap = deduplicate_poles_with_remap(
+        gdf_final_poles,
+        associations_df,
+        tol_m=DEDUP_TOL_M,
+        prefer_serving=True,
+    )
+
+    # After dropping poles, ensure pole_id are still unique ints
+    gdf_final_poles["pole_id"] = pd.to_numeric(gdf_final_poles["pole_id"], errors="coerce")
+    gdf_final_poles = gdf_final_poles.dropna(subset=["pole_id"]).copy()
+    gdf_final_poles["pole_id"] = gdf_final_poles["pole_id"].astype(int)
+
+    if gdf_final_poles["pole_id"].duplicated().any():
+        raise ValueError("Deduplication produced duplicate pole_id values; this should not happen.")
+
 
     # ------------------------------------------------------------------
     # 4b) Append new associations
@@ -157,8 +180,15 @@ def run_low_voltage(
         associations_df["pole_id"] = associations_df["pole_id"].astype(int)
         associations_df["building_id"] = associations_df["building_id"].astype(int)
 
-        if int(associations_df["pole_id"].max()) >= len(gdf_final_poles):
-            raise ValueError("Pole ID mismatch in base associations vs base pole set.")
+        valid_base_pole_ids = set(pd.to_numeric(gdf_final_poles["pole_id"], errors="coerce").dropna().astype(int).tolist())
+        missing_base_poles = sorted(
+            pid for pid in associations_df["pole_id"].astype(int).tolist() if int(pid) not in valid_base_pole_ids
+        )
+        if missing_base_poles:
+            raise ValueError(
+                "Pole ID mismatch in base associations vs base pole set. "
+                f"Example missing pole_ids (up to 20): {missing_base_poles[:20]}"
+            )
 
     # base serving ids and types
     base_serving_ids = set(associations_df["pole_id"].unique()) if not associations_df.empty else set()
@@ -313,7 +343,80 @@ def run_low_voltage(
     gdf_poles_densified = gpd.GeoDataFrame(poles_all, crs=gdf_buildings.crs)
 
     # ------------------------------------------------------------------
-    # 7) Service drops length (recomputed using densified poles!)
+    # 6c) Post-densification cleanup for near-coincident final poles.
+    # Densification can insert support poles very close to existing poles,
+    # especially where long spans terminate near intersections. If left as-is,
+    # this creates ultra-short electrical segments that the PF step correctly
+    # filters out as numerical near-shorts, which can orphan a load-bearing pole.
+    #
+    # We merge only very-close final poles here, then collapse the MST node IDs
+    # with the same remap so topology and associations stay consistent.
+    # ------------------------------------------------------------------
+    FINAL_MERGE_TOL_M = 10.0
+    gdf_poles_densified, associations_df, final_pole_id_remap = deduplicate_poles_with_remap(
+        gdf_poles_densified,
+        associations_df,
+        tol_m=FINAL_MERGE_TOL_M,
+        prefer_serving=True,
+    )
+    mst = merge_graph_nodes_with_remap(mst, final_pole_id_remap)
+
+    final_serving_ids = set(associations_df["pole_id"].unique()) if not associations_df.empty else set()
+    gdf_poles_densified["pole_type"] = gdf_poles_densified.apply(_final_type, axis=1)
+
+    # Stable MST edges as pole_id pairs (for PF / validation).
+    #
+    # IMPORTANT:
+    # `mst` already uses stable pole_id values as graph node IDs.
+    # Do not remap through GeoDataFrame row indices here: after deduplication the
+    # row index is no longer guaranteed to match pole_id, and that can corrupt the
+    # exported PF topology (load-bearing poles appear disconnected even though the
+    # internal MST is connected).
+    mst_edges_pole_ids = [(int(u), int(v)) for u, v in mst.edges()]
+
+    # ------------------------------------------------------------------
+    # 6d) Consistency check: every served building must reference a graph pole,
+    # and every serving pole must belong to the electrical tree.
+    # ------------------------------------------------------------------
+    if not associations_df.empty:
+        graph_pole_ids = {int(n) for n in mst.nodes()}
+        assoc_pole_ids = set(pd.to_numeric(associations_df["pole_id"], errors="coerce").dropna().astype(int).tolist())
+
+        missing_poles = sorted(pid for pid in assoc_pole_ids if pid not in graph_pole_ids)
+        if missing_poles:
+            raise ValueError(
+                "Topology consistency error: some buildings reference poles that are not present in the MST graph. "
+                f"Example pole_ids (up to 20): {missing_poles[:20]}"
+            )
+
+        orphan_serving_poles = sorted(pid for pid in assoc_pole_ids if int(mst.degree(pid)) < 1)
+        if orphan_serving_poles:
+            raise ValueError(
+                "Topology consistency error: some poles have assigned buildings but no electrical connection in the MST. "
+                f"Example pole_ids (up to 20): {orphan_serving_poles[:20]}"
+            )
+
+        pole_geom_by_id_post = gdf_poles_densified.set_index("pole_id").geometry.to_dict()
+        missing_geom_poles = sorted(pid for pid in assoc_pole_ids if int(pid) not in pole_geom_by_id_post)
+        if missing_geom_poles:
+            raise ValueError(
+                "Topology consistency error: some buildings reference poles missing from the final pole table. "
+                f"Example pole_ids (up to 20): {missing_geom_poles[:20]}"
+            )
+
+    short_final_edges = sorted(
+        float(data.get("weight", 0.0))
+        for _, _, data in mst.edges(data=True)
+        if float(data.get("weight", 0.0)) < FINAL_MERGE_TOL_M
+    )
+    if short_final_edges:
+        raise ValueError(
+            "Topology consistency error: final MST still contains ultra-short pole-to-pole segments after cleanup. "
+            f"Shortest remaining segment = {short_final_edges[0]:.2f} m; expected >= {FINAL_MERGE_TOL_M:.2f} m."
+        )
+
+    # ------------------------------------------------------------------
+    # 7) Service drops length (recomputed using densified poles)
     # ------------------------------------------------------------------
     service_drop_length_m = 0.0
     if not associations_df.empty:
@@ -385,6 +488,8 @@ def run_low_voltage(
         "gdf_served_4326": gdf_served_4326,
         "gdf_unserved_4326": gdf_unserved_4326,
         "mst_edges_latlon": mst_edges_latlon,
+        "mst_edges_pole_ids": mst_edges_pole_ids,
+        "associations_df": associations_df,
         "downloads": {
             "nodes_geojson": nodes_geojson,
             "edges_geojson": edges_geojson,
