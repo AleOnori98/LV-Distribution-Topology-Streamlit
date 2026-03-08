@@ -62,6 +62,7 @@ def set_project_request(
     *,
     topology_request: Optional[dict[str, Any]] = None,
     validation_request: Optional[dict[str, Any]] = None,
+    reinforcement_request: Optional[dict[str, Any]] = None,
 ) -> None:
     ensure_session_domains(session_state)
     project = session_state["project"]
@@ -69,6 +70,8 @@ def set_project_request(
         project["topology_request"] = topology_request
     if validation_request is not None:
         project["validation_request"] = validation_request
+    if reinforcement_request is not None:
+        project["reinforcement_request"] = reinforcement_request
 
 
 def get_topology_result(session_state: MutableMapping[str, Any]) -> Optional[TopologyResult]:
