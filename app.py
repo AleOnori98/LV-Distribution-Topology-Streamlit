@@ -304,17 +304,8 @@ def main() -> None:
 
         The workflow has two main steps. First, **pole locations are generated and buildings are associated to poles**
         using a heuristic approach. When roads are available, candidate poles are sampled along road segments; otherwise,
-        poles are placed inside the settlement based on clustering of nearby buildings. This step is guided by a few
-        intuitive parameters:
-
-        - **Max user–pole connection radius**, limiting how far a building can be from a pole  
-        - **Max users per pole**, limiting how many buildings share the same pole  
-        - **Road pole spacing**, controlling how dense candidate poles are along roads  
-
-        Once poles are defined, they are connected into a **single radial LV network** by computing a
-        **Minimum Spanning Tree (MST)**, which minimizes total cable length while avoiding loops.
-
-        An optional **engineering post-processing** step can then be applied through the **Max LV span between poles**
+        poles are placed inside the settlement based on clustering of nearby buildings. Once poles are defined, they are connected into a **single radial LV network** by computing a
+        **Minimum Spanning Tree (MST)**, which minimizes total cable length while avoiding loops. A final **engineering post-processing** step is then applied through the **Max LV span between poles**
         parameter. If any LV segment is longer than this threshold, it is subdivided by inserting intermediate
         support poles, preserving one connected network while avoiding unrealistically long spans.
     """
@@ -326,7 +317,7 @@ def main() -> None:
     if methodology_img.exists():
         st.image(
             str(methodology_img),
-            use_container_width=True,
+            width='stretch',
             caption="Process flow for LV distribution network design",
         )
 
@@ -468,9 +459,9 @@ def main() -> None:
     # ---------------------------- Actions ----------------------------
     left, right, _ = st.columns([1, 1, 1])
     with left:
-        run_clicked = st.button("Run LV design", type="primary", use_container_width=True)
+        run_clicked = st.button("Run LV design", type="primary", width='stretch')
     with right:
-        clear_clicked = st.button("Clear results", use_container_width=True)
+        clear_clicked = st.button("Clear results", width='stretch')
 
     if clear_clicked:
         st.session_state["dist_results"] = None
