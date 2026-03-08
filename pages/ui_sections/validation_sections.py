@@ -23,7 +23,6 @@ This page implements the **minimum electrical validation step** for an LV topolo
 2) load/assign hourly building demands and aggregate to poles  
 3) choose line-parameter assumptions (global or catalog-driven)  
 4) run a single-snapshot power flow with a single slack/generation bus  
-5) optionally optimize fixed-topology line reinforcement (capacity upgrades only)  
 """
     )
     st.divider()
@@ -370,153 +369,9 @@ def render_pf_run_controls(
     }
 
 
-def render_reinforcement_controls(*, default_enabled: bool) -> Dict[str, Any]:
-    with st.expander("Step 3 settings: Grid reinforcement optimization", expanded=False):
-        run_even_if_clean = st.checkbox(
-            "Allow optimization even when PF has no violations",
-            value=bool(default_enabled),
-            key="rf_run_even_if_clean",
-        )
-
-        mode_label = st.selectbox(
-            "Reinforcement scope",
-            options=(
-                "All lines",
-                "Only currently overloaded lines",
-                "Only feeder paths to voltage-violating buses",
-            ),
-            index=0,
-            key="rf_selection_mode",
-        )
-        selection_mode = {
-            "All lines": "all_lines",
-            "Only currently overloaded lines": "overloaded_only",
-            "Only feeder paths to voltage-violating buses": "violating_feeder_path",
-        }[mode_label]
-
-        c1, c2 = st.columns(2)
-        with c1:
-            cost_per_km_per_kva = st.number_input(
-                "Cost fallback [currency / (km*kVA)]",
-                min_value=0.0001,
-                max_value=100.0,
-                value=0.08,
-                step=0.01,
-                key="rf_cost_per_km_per_kva",
-            )
-        with c2:
-            max_upgrade_factor = st.number_input(
-                "Max upgrade factor (x current capacity)",
-                min_value=1.0,
-                max_value=50.0,
-                value=4.0,
-                step=0.5,
-                key="rf_max_upgrade_factor",
-            )
-
-        emergency_shed = st.checkbox(
-            "Enable emergency load shedding (very high penalty)",
-            value=False,
-            key="rf_allow_shedding",
-        )
-        shedding_penalty = st.number_input(
-            "Shedding penalty [currency/MWh]",
-            min_value=1000.0,
-            max_value=1_000_000_000.0,
-            value=100000.0,
-            step=1000.0,
-            key="rf_shedding_penalty",
-            disabled=not emergency_shed,
-        )
-
-        solver_name = st.text_input(
-            "Solver name (optional, leave blank for PyPSA default)",
-            value="",
-            key="rf_solver_name",
-        ).strip()
-
-        run_clicked = st.button("Optimize grid reinforcement", type="secondary", key="rf_run_btn")
-
-    return {
-        "run_even_if_clean": bool(run_even_if_clean),
-        "selection_mode": selection_mode,
-        "cost_per_km_per_kva": float(cost_per_km_per_kva),
-        "max_upgrade_factor": float(max_upgrade_factor),
-        "allow_emergency_load_shedding": bool(emergency_shed),
-        "shedding_penalty_per_mwh": float(shedding_penalty),
-        "solver_name": (solver_name if solver_name else None),
-        "run_clicked": bool(run_clicked),
-    }
-
-
-def render_reinforcement_results(res: Optional[Dict[str, Any]], *, pf_map: Optional[Dict[str, Any]] = None) -> None:
-    if res is None:
-        return
-
-    st.divider()
-    st.subheader("Step 3 results: Reinforcement optimization")
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Optimization status", str(res["optimization_status"]))
-    c2.metric("Added capacity [kVA]", f"{float(res['total_added_capacity_kva']):.2f}")
-    c3.metric("Estimated reinforcement cost", f"{float(res['total_reinforcement_cost']):.2f}")
-
-    pre = dict(res["pre_summary"])
-    post = dict(res["post_summary"])
-    cmp_df = pd.DataFrame(
-        [
-            {"metric": "PF buses", "pre": pre.get("num_buses"), "post": post.get("num_buses")},
-            {"metric": "PF lines", "pre": pre.get("num_lines"), "post": post.get("num_lines")},
-            {"metric": "Voltage violations", "pre": pre.get("num_voltage_violations"), "post": post.get("num_voltage_violations")},
-            {"metric": "Min voltage [p.u.]", "pre": pre.get("v_min_pu_observed"), "post": post.get("v_min_pu_observed")},
-            {"metric": "Max voltage [p.u.]", "pre": pre.get("v_max_pu_observed"), "post": post.get("v_max_pu_observed")},
-            {"metric": "Worst line loading [p.u.]", "pre": pre.get("max_line_loading_pu"), "post": post.get("max_line_loading_pu")},
-        ]
-    )
-    st.dataframe(cmp_df, use_container_width=True)
-
-    st.markdown("**Reinforced lines**")
-    st.dataframe(res["reinforced_lines"], use_container_width=True)
-
-    csv_bytes = res["reinforced_lines"].to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download reinforced lines CSV",
-        data=csv_bytes,
-        file_name=f"reinforced_lines_hour_{int(res['hour'])}.csv",
-        mime="text/csv",
-        key="rf_download_csv",
-    )
-
-    with st.expander("Optimization debug", expanded=False):
-        st.json(res.get("optimize_debug", {}) or {})
-
-    if pf_map is not None:
-        st.markdown("**Post-optimization network status**")
-        m = make_map_lv_with_pf_violations(
-            center=tuple(pf_map["center"]),
-            gdf_poles_4326=pf_map["gdf_poles_4326"],
-            pole_id_col=str(pf_map["pole_id_col"]),
-            gdf_edges_4326=pf_map.get("gdf_edges_4326"),
-            mst_edges_latlon=pf_map.get("mst_edges_latlon"),
-            gdf_roads_4326=pf_map.get("gdf_roads_4326"),
-            zoom_start=15,
-            slack_pole_id=pf_map.get("slack_pole_id"),
-            bus_v_pu=pf_map.get("bus_v_pu"),
-            line_loading_pu=pf_map.get("line_loading_pu"),
-            reinforced_line_pairs=pf_map.get("reinforced_line_pairs"),
-            v_min_pu=float(pf_map["v_min_pu"]),
-            v_max_pu=float(pf_map["v_max_pu"]),
-            line_loading_limit_pu=1.0,
-            show_legend=True,
-        )
-        st_folium(m, height=650, use_container_width=True, key=f"rf_results_map_{int(res['hour'])}")
-
-
 def render_pf_results(
     res: Optional[Dict[str, Any]],
     pf_map: Optional[Dict[str, Any]] = None,
-    *,
-    reinforced_line_pairs: Optional[set[tuple[int, int]]] = None,
 ) -> None:
     if res is None:
         return
@@ -548,7 +403,6 @@ def render_pf_results(
             slack_pole_id=pf_map.get("slack_pole_id"),
             bus_v_pu=pf_map.get("bus_v_pu"),
             line_loading_pu=pf_map.get("line_loading_pu"),
-            reinforced_line_pairs=reinforced_line_pairs,
             v_min_pu=float(pf_map["v_min_pu"]),
             v_max_pu=float(pf_map["v_max_pu"]),
             line_loading_limit_pu=1.0,
