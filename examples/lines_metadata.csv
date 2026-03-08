@@ -1,0 +1,4 @@
+line_id,line_type,r_ohm_per_km_override,x_ohm_per_km_override,s_nom_kva_override
+L0,main,,,
+L1,service,,,80
+L2,service,0.850,,70

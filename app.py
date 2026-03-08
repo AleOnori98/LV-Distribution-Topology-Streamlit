@@ -1,300 +1,32 @@
 from __future__ import annotations
 
-import time
-from typing import Any, Dict, Optional
-
 import streamlit as st
-from streamlit_folium import st_folium
-import folium
-from folium import Map, PolyLine, CircleMarker
 
-from config.settings import (
-    PathManager,
-    DEFAULT_COST_PER_KM_LV,
-    DEFAULT_FIXED_COSTS_LV,
-    DEFAULT_SAMPLING_DISTANCE_M,
-    DEFAULT_USER_DISTANCE_M,
-    DEFAULT_MAX_ASSOCIATIONS,
-)
-from core.distribution_service import run_low_voltage
+from core.pipeline_state import ensure_session_domains
 
 
-# ---------------------------------------------------------------------
-# Streamlit page config
-# ---------------------------------------------------------------------
 st.set_page_config(
-    page_title="LV Distribution Network",
+    page_title="Mini-Grid LV Toolkit",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+ensure_session_domains(st.session_state)
 
-# ---------------------------------------------------------------------
-# UI helper functions
-# ---------------------------------------------------------------------
-def _metric_row(metrics: Dict[str, float]) -> None:
-
-    # ---- Row 1: Network lengths -------------------------------------
-    st.text(
-        "Estimated total line length of the LV system, split between the main backbone "
-        "(pole-to-pole feeder network) and the final connections from poles to individual buildings."
-    )
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total network length [km]", f"{metrics.get('total_network_length_km', 0.0):.2f}")
-    c2.metric("LV backbone length [km]", f"{metrics.get('backbone_length_km', 0.0):.2f}")
-    c3.metric("Service drop length [km]", f"{metrics.get('service_drop_length_km', 0.0):.2f}")
-
-    # ---- Row 2: Poles breakdown -------------------------------------
-    st.text(
-        "Number of poles required for the LV network. Serving poles supply buildings directly, "
-        "while support poles are added only to limit span lengths and do not host connections."
-    )
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total poles", int(metrics.get("num_poles_total", 0)))
-    c2.metric("Serving poles", int(metrics.get("num_poles_serving", 0)))
-    c3.metric("Support poles", int(metrics.get("num_poles_support", 0)))
-
-    # ---- Row 3: Buildings breakdown ---------------------------------
-    st.text(
-        "Coverage of the settlement by the LV network. Standalone candidates are buildings "
-        "left unconnected due to isolation or clustering constraints."
-    )
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total buildings", int(metrics.get("num_buildings", 0)))
-    c2.metric("Grid-served buildings", int(metrics.get("num_served", 0)))
-    c3.metric("Standalone candidates", int(metrics.get("num_unserved", 0)))
-
-def _geom_to_latlon(g):
-    """Return (lat, lon) for any shapely geometry."""
-    if g is None or g.is_empty:
-        return None
-    if g.geom_type == "Point":
-        p = g
-    else:
-        # Works for Polygon, MultiPolygon, LineString, MultiLineString, etc.
-        p = g.representative_point()
-    return (p.y, p.x)  # (lat, lon)
-
-def _make_map_lv(
-    center: tuple[float, float],
-    gdf_served,
-    gdf_unserved,
-    gdf_poles,
-    mst_edges_latlon,
-    gdf_roads=None,
-) -> Map:
+st.title("Mini-Grid LV Toolkit")
+st.markdown(
+    """This app provides a streamlined workflow for low-voltage (LV) mini-grid design and screening, built
+    for rapid iteration and early-stage exploration. The app is organized into three main steps: topology generation,
+    electrical validation, and grid reinforcement optimization. The workflow is designed to be flexible, allowing users
+    to move back and forth between steps while maintaining session state as the internal source of truth.
+    The app is built on a heuristic MST-based layout for fast topology generation, with an integrated power-flow validation step that supports both global line assumptions and catalog-driven per-line characteristics. The reinforcement optimization
+    focuses on minimum-cost line capacity upgrades without rerouting or load shifting, providing a practical tool for early-stage mini-grid design and screening.
     """
-    Build the interactive LV map.
+)
 
-    - Roads: grey lines
-    - MST edges: blue-ish lines
-    - Serving poles: black filled
-    - Support poles: dark gray outline + light fill
-    - Non-serving base poles: small black dots (optional)
-    - Grid-served buildings: green markers
-    - Standalone candidates: red markers
-    """
-    m = folium.Map(location=[center[0], center[1]], zoom_start=15)
+c1, c2, c3 = st.columns(3)
 
-    # Roads
-    if gdf_roads is not None and not gdf_roads.empty:
-        for _, row in gdf_roads.iterrows():
-            geom = row.geometry
-            if geom is None:
-                continue
-            if geom.geom_type == "LineString":
-                coords = [(lat, lon) for lon, lat in geom.coords]
-                PolyLine(locations=coords, color="gray", weight=3, opacity=0.7).add_to(m)
-            elif geom.geom_type == "MultiLineString":
-                for line in geom.geoms:
-                    coords = [(lat, lon) for lon, lat in line.coords]
-                    PolyLine(locations=coords, color="gray", weight=3, opacity=0.7).add_to(m)
-
-    # MST edges
-    for (lat1, lon1), (lat2, lon2) in mst_edges_latlon:
-        PolyLine(
-            locations=[(lat1, lon1), (lat2, lon2)],
-            color="blue",
-            weight=2,
-            opacity=0.9,
-        ).add_to(m)
-
-    # Poles
-    if gdf_poles is not None and not gdf_poles.empty:
-        for _, row in gdf_poles.iterrows():
-            latlon = _geom_to_latlon(row.geometry)
-            if latlon is None:
-                continue
-            y, x = latlon
-
-            pole_type = str(row.get("pole_type", "base")).strip().lower()
-
-            if pole_type == "support":
-                CircleMarker(
-                    location=[y, x],
-                    radius=4,
-                    color="#555555",
-                    weight=3,
-                    fill=True,
-                    fill_color="#BBBBBB",
-                    fill_opacity=0.9,
-                    tooltip="Support pole",
-                ).add_to(m)
-
-            elif pole_type == "serving":
-                CircleMarker(
-                    location=[y, x],
-                    radius=4,
-                    color="black",
-                    weight=2,
-                    fill=True,
-                    fill_color="black",
-                    fill_opacity=1.0,
-                    tooltip="Serving pole",
-                ).add_to(m)
-
-            else:  # "non_serving" or "base"
-                CircleMarker(
-                    location=[y, x],
-                    radius=2,
-                    color="black",
-                    weight=1,
-                    fill=True,
-                    fill_color="black",
-                    fill_opacity=0.7,
-                    tooltip="Non-serving pole",
-                ).add_to(m)
-
-    # Grid-served buildings (green)
-    if gdf_served is not None and not gdf_served.empty:
-        for _, row in gdf_served.iterrows():
-            latlon = _geom_to_latlon(row.geometry)
-            if latlon is None:
-                continue
-            y, x = latlon
-            CircleMarker(
-                location=[y, x],
-                radius=2,
-                color="green",
-                fill=True,
-                fill_color="green",
-                fill_opacity=0.8,
-            ).add_to(m)
-
-    # Standalone candidates / unserved (red)
-    if gdf_unserved is not None and not gdf_unserved.empty:
-        for _, row in gdf_unserved.iterrows():
-            latlon = _geom_to_latlon(row.geometry)
-            if latlon is None:
-                continue
-            y, x = latlon
-            CircleMarker(
-                location=[y, x],
-                radius=3,
-                color="red",
-                fill=True,
-                fill_color="red",
-                fill_opacity=0.9,
-            ).add_to(m)
-
-    return m
-
-def _render_downloads(downloads: Dict[str, Any]) -> None:
-    if not downloads:
-        return
-
-    nodes = downloads.get("nodes_geojson")
-    edges = downloads.get("edges_geojson")
-    assoc = downloads.get("associations_csv")
-
-    if not nodes and not edges and not assoc:
-        return
-
-    st.subheader("Download outputs")
-
-    st.text(
-        "Export LV topology as GeoJSON files (for GIS) and the building-to-pole association CSV.\n"
-        "- Nodes include pole_id and pole_type (serving / non_serving / support)\n"
-        "- Edges represent the pole-to-pole MST network\n"
-        "- associations.csv maps each served building_id to its serving pole_id (support poles excluded by design)."
-    )
-
-    if nodes:
-        st.download_button(
-            "Download poles (nodes) GeoJSON",
-            data=nodes,
-            file_name="lv_poles.geojson",
-            mime="application/geo+json",
-        )
-
-    if edges:
-        st.download_button(
-            "Download LV network (edges) GeoJSON",
-            data=edges,
-            file_name="lv_network.geojson",
-            mime="application/geo+json",
-        )
-
-    if assoc:
-        st.download_button(
-            "Download building → pole associations (CSV)",
-            data=assoc,
-            file_name="associations.csv",
-            mime="text/csv",
-        )
-
-def _show_lv_results(results: Dict[str, Any]) -> None:
-    _metric_row(results["metrics"])
-
-    st.subheader("Distribution map")
-    st.caption(
-        "Green = grid-served buildings; Red = standalone candidates; "
-        "Black = serving poles; Gray = support poles; Blue = LV network (MST)."
-    )
-
-    m = _make_map_lv(
-        center=results["center"],
-        gdf_served=results.get("gdf_served_4326"),
-        gdf_unserved=results.get("gdf_unserved_4326"),
-        gdf_poles=results.get("gdf_poles_4326"),
-        mst_edges_latlon=results.get("mst_edges_latlon", []),
-        gdf_roads=results.get("gdf_roads_4326"),
-    )
-    st_folium(m, height=600, width=900)
-
-    _render_downloads(results.get("downloads", {}))
-
-# ---------------------------------------------------------------------
-# Main UI
-# ---------------------------------------------------------------------
-
-def main() -> None:
-    # Session state init
-    if "dist_results" not in st.session_state:
-        st.session_state["dist_results"] = None
-        st.session_state["dist_solve_seconds"] = None
-
-    # Sidebar instructions
-    with st.sidebar:
-        st.header("How to use")
-        st.markdown(
-            """
-            1. **Upload users file** (required)  
-            2. (Optional) upload **roads file** if you want poles to follow roads  
-            3. Adjust **heuristic** parameters  
-            4. Choose whether to **allow isolated buildings to remain unserved**  
-            5. Click **Run LV design**  
-            6. Inspect the map and download GeoJSON outputs
-            """
-        )
-        st.markdown("---")
-        st.markdown("**Example data**: see the `examples/` folder in this project.")
-
-    # Title + description
-    st.title("LV Distribution Network - Topology Assessment")
+with c1:
     st.markdown(
         """
         This app provides a **first-order topology assessment** for Low-Voltage (LV) distribution networks, starting from
@@ -413,19 +145,25 @@ def main() -> None:
         ),
     )
 
-    st.markdown("---")
-
-    # ------------------ Coverage behaviour (new toggle) --------------
-    st.subheader("Coverage behaviour")
-
-    allow_unserved_isolated = st.checkbox(
-        "Allow very isolated buildings to remain unserved (standalone candidates)",
-        value=False,
-        help=(
-            "If enabled, very small or isolated clusters of buildings will not be "
-            "connected by LV. They will be shown as red points and can be treated "
-            "as standalone system candidates."
-        ),
+with c3:
+    st.markdown(
+        """
+<div class="card">
+    <div class="pill">Step 3</div>
+    <h4>Grid Reinforcement</h4>
+    <p>
+        Keep topology and load snapshot fixed, then optimize line-capacity reinforcement on existing edges
+        to reduce overloads at minimum upgrade cost.
+    </p>
+    <p>
+        The optimization does not reroute the network, does not move loads, and does not add decentralized generation.
+    </p>
+    <p>
+        Main outputs: reinforced lines, added capacity, estimated reinforcement cost, and post-upgrade PF checks.
+    </p>
+</div>
+""",
+        unsafe_allow_html=True,
     )
 
     if allow_unserved_isolated:
@@ -514,6 +252,17 @@ def main() -> None:
     else:
         st.info("No results yet. Configure inputs and click **Run LV design**.")
 
+st.markdown("### What Is Included")
+f1, f2, f3 = st.columns(3)
+f1.info("Topology generation with MST-based LV layout and downloadable network outputs.")
+f2.info("Demand aggregation from `building_metadata.csv` and `category_profiles.csv` into hourly pole loads.")
+f3.info("Power-flow validation with voltage checks, line loading, map overlays, and optional per-line cable catalogs.")
 
-if __name__ == "__main__":
-    main()
+st.markdown(
+    """
+<div class="note">
+    Use the sidebar to move through the workflow. For a quick start, baseline sample inputs are available in <code>examples/</code>.
+</div>
+""",
+    unsafe_allow_html=True,
+)
