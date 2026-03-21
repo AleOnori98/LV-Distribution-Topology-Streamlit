@@ -238,7 +238,7 @@ with c3:
                     )
                 except Exception as exc:
                     st.error(f"LV design failed: {exc}")
-                    return
+                    st.stop()
 
                 elapsed = time.perf_counter() - t0
                 st.session_state["dist_results"] = results
