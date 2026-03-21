@@ -1,0 +1,15 @@
+streamlit
+streamlit-folium
+folium
+branca
+numpy
+pandas
+geopandas
+shapely
+pyproj
+pyogrio
+networkx
+scipy
+scikit-learn
+openpyxl
+pypsa
