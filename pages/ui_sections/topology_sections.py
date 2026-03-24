@@ -58,7 +58,7 @@ def render_upload_section() -> tuple[Optional[Any], str, Optional[Any]]:
     st.subheader("Upload connection data")
 
     users_file = st.file_uploader(
-        "Users file (GeoPackage `.gpkg` or Excel `.xlsx`) â€“ **required**",
+        "Users file (GeoPackage `.gpkg` or Excel `.xlsx`) - **required**",
         type=["gpkg", "xlsx"],
         key="dist_users_file",
     )
@@ -113,7 +113,7 @@ def render_params_section(
 
     with col2:
         max_user_connection_radius_m = st.slider(
-            "Max userâ€“pole connection radius [m]",
+            "Max user–pole connection radius [m]",
             min_value=10,
             max_value=200,
             value=int(default_user_distance_m),
@@ -394,7 +394,7 @@ def _render_downloads(downloads: Dict[str, Any]) -> None:
 
     if assoc:
         st.download_button(
-            "Download building â†’ pole associations (CSV)",
+            "Download building-to-pole associations (CSV)",
             data=assoc,
             file_name="associations.csv",
             mime="text/csv",

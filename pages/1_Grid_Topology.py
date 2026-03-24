@@ -70,7 +70,7 @@ def main() -> None:
                 "Either upload a `.gpkg` or switch to **Free placement**."
             )
         else:
-            with st.spinner("Running LV distribution designâ€¦"):
+            with st.spinner("Running LV distribution design..."):
                 t0 = time.perf_counter()
                 try:
                     results = run_low_voltage(
